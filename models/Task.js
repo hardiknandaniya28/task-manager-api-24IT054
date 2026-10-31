@@ -29,6 +29,11 @@ const taskSchema = new mongoose.Schema({
             message: '{VALUE} is not a valid priority (low, medium, high)'
         },
         default: 'medium'
+    },
+
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
     }
 });
 

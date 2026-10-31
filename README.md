@@ -165,3 +165,133 @@ npm run dev
    - Verify the task is removed and success toast appears.
 5. **Error Handling**:
    - If the backend server is stopped, the frontend displays an informative error banner with a **Try Again** button.
+
+
+---
+
+# Practical 7: Authentication and Middleware Pipeline
+
+## Objective
+To implement secure user authentication and request validation as part of the Express middleware pipeline using JSON Web Tokens (JWT) and bcrypt. Practical 7 introduces user registration (`POST /register`), login (`POST /login`), password hashing, token generation with expiration (1 hour), protected routes via `authMiddleware`, server-side validation (`validateTask`), the `/me` user profile endpoint, and full frontend authentication integration with token storage and automatic logout on expiration.
+
+---
+
+## Architecture & Authentication Pipeline
+
+```
+Public Request:
+POST /register ──> Input Validation ──> bcrypt.hash(10) ──> Save User to MongoDB ──> 201 Created
+POST /login    ──> Find User ──> bcrypt.compare() ──> jwt.sign(token, 1h) ──> 200 OK + JWT
+
+Protected Request Flow:
+Client Request (Headers: Authorization: Bearer <token>)
+       │
+       ▼
+[1. Request Logger] (Logs method, path, timestamp)
+       │
+       ▼
+[2. JSON Parser] (express.json)
+       │
+       ▼
+[3. authMiddleware] (Extracts & verifies JWT using JWT_SECRET; sets req.user)
+       │
+       ▼
+[4. validateTask Middleware] (Rejects missing title or invalid priority with 400 Bad Request)
+       │
+       ▼
+[5. Task Controller] (CRUD operations on MongoDB Atlas)
+```
+
+---
+
+## Technologies Used
+- **bcryptjs**: Secure password hashing with salt rounds (10)
+- **jsonwebtoken (JWT)**: Cryptographic signature and verification for stateless session tokens
+- **Express 5 Middleware**: Chain-of-responsibility request pipeline for authentication and validation
+- **Mongoose 9**: Document modeling with unique email indices and schemas
+
+---
+
+## Environment Configuration
+
+Configure `student-portfolio/task-manager-api-24IT054/.env`:
+```env
+PORT=5000
+MONGO_URI=mongodb+srv://<username>:<password>@cluster0.vqmnod8.mongodb.net/taskmanager?retryWrites=true&w=majority
+JWT_SECRET=your_secure_random_jwt_secret_key_here
+```
+> **Security Note:** `JWT_SECRET` and `MONGO_URI` are strictly backend-only. Never expose them to the frontend, git commits, or public repositories.
+
+---
+
+## API Endpoints (Practical 7)
+
+| Method | Endpoint | Access | Headers | Request Body | Success Code | Error Codes |
+|---|---|---|---|---|---|---|
+| **POST** | `/register` | Public | None | `{ "email": "user@example.com", "password": "StrongPassword123" }` | `201 Created` | `400 Bad Request` |
+| **POST** | `/login` | Public | None | `{ "email": "user@example.com", "password": "StrongPassword123" }` | `200 OK` + Token | `401 Unauthorized` |
+| **GET** | `/me` | Protected | `Authorization: Bearer <token>` | None | `200 OK` (User profile) | `401 Unauthorized` |
+| **GET** | `/tasks` | Protected | `Authorization: Bearer <token>` | None | `200 OK` (Task array) | `401 Unauthorized` |
+| **POST** | `/tasks` | Protected | `Authorization: Bearer <token>` | `{ "title": "New Task", "priority": "high" }` | `201 Created` | `400` / `401` |
+| **PUT** | `/tasks/:id` | Protected | `Authorization: Bearer <token>` | `{ "completed": true }` | `200 OK` | `400` / `401` / `404` |
+| **DELETE** | `/tasks/:id` | Protected | `Authorization: Bearer <token>` | None | `200 OK` | `400` / `401` / `404` |
+
+---
+
+## Middleware Pipeline Implementation Details
+
+1. **Authentication Middleware (`middleware/authMiddleware.js`)**:
+   - Inspects `req.headers.authorization`.
+   - Validates format: `Bearer <token>`.
+   - Verifies the signature using `jwt.verify(token, process.env.JWT_SECRET)`.
+   - Catches `TokenExpiredError` and malformed token errors gracefully, returning `401 Unauthorized`.
+   - Sets `req.user = decoded` for downstream route handlers.
+
+2. **Validation Middleware (`middleware/validateTask.js`)**:
+   - Intercepts incoming `POST` and `PUT` task requests.
+   - Rejects empty, whitespace-only, or missing `title` with `400 Bad Request`.
+   - Rejects invalid `priority` enum values before touching MongoDB.
+
+3. **Frontend Authentication (`src/components/Auth.jsx`)**:
+   - Matches the reference design with tabbed Login / Registration form.
+   - Stores JWT token in `localStorage.setItem('token', token)`.
+   - Includes `Authorization: Bearer <token>` on all task requests in `src/api.js`.
+   - Automatically catches `401` responses, clears stored token, and redirects to the login screen.
+   - Includes **Log Out** button which clears client session state.
+
+---
+
+## Testing with curl / PowerShell
+
+```powershell
+# 1. Register a new user
+curl -X POST http://localhost:5000/register `
+  -H "Content-Type: application/json" `
+  -d '{\"email\": \"student@example.com\", \"password\": \"StrongPassword123\"}'
+
+# 2. Login to obtain JWT
+curl -X POST http://localhost:5000/login `
+  -H "Content-Type: application/json" `
+  -d '{\"email\": \"student@example.com\", \"password\": \"StrongPassword123\"}'
+
+# 3. Access protected route WITHOUT token (Expects 401 Unauthorized)
+curl http://localhost:5000/tasks
+
+# 4. Access protected route WITH token (Replace <YOUR_TOKEN>)
+curl http://localhost:5000/tasks `
+  -H "Authorization: Bearer <YOUR_TOKEN>"
+
+# 5. Access /me user profile endpoint
+curl http://localhost:5000/me `
+  -H "Authorization: Bearer <YOUR_TOKEN>"
+```
+
+---
+
+## Practical 7 Evidence / Screenshot Checklist
+1. Registration form on `http://localhost:5173/tasks`.
+2. Login form on `http://localhost:5173/tasks`.
+3. Authenticated Task Manager screen showing user email and **Log Out** button.
+4. Terminal testing showing `POST /register` returning 201 and `POST /login` returning JWT.
+5. Unauthorized request (`GET /tasks` without token) returning 401.
+6. MongoDB Atlas showing hashed passwords in the `users` collection.
