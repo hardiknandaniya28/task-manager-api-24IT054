@@ -373,10 +373,10 @@ const server = app.listen(PORT, () => {
 });
 
 // Connect to MongoDB Atlas
-const MONGO_URI = process.env.MONGO_URI;
+const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI;
 
 if (!MONGO_URI) {
-    console.error('MongoDB connection failed: MONGO_URI is not defined in .env');
+    console.error('MongoDB connection failed: Neither MONGO_URI nor MONGODB_URI is defined in .env');
 } else {
     mongoose.connect(MONGO_URI)
         .then(() => {
