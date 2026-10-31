@@ -1,6 +1,7 @@
 const path = require('path');
 const express = require('express');
 const mongoose = require('mongoose');
+const cors = require('cors');
 
 // Load .env relative to this file's directory so it works from any working directory
 require('dotenv').config({ path: path.join(__dirname, '.env') });
@@ -9,6 +10,9 @@ const Task = require('./models/Task');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// Enable CORS for frontend requests (e.g. from React on http://localhost:5173)
+app.use(cors());
 
 // 1. Request logging middleware
 app.use((req, res, next) => {
@@ -202,6 +206,9 @@ if (!MONGO_URI) {
                 ? err.message.replace(/mongodb(\+srv)?:\/\/[^@]+@/i, 'mongodb+srv://<credentials>@')
                 : 'Unknown error';
             console.error('MongoDB connection failed:', sanitizedMsg);
+            if (err.name === 'MongooseServerSelectionError') {
+                console.error('Atlas Troubleshooting: Verify Network Access has 0.0.0.0/0 whitelisted and Database Access credentials are valid.');
+            }
         });
 }
 
