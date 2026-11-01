@@ -422,3 +422,127 @@ Send `GET http://localhost:5000/debug/cache-stats`:
 
 3. **Why is `node-cache` not suitable for multi-server/multi-instance deployments?**
    `node-cache` stores data in the local memory of the specific Node.js process. In a horizontally scaled production deployment with multiple server instances behind a load balancer, an update handled by Instance A will only invalidate Instance A's local memory. Requests routed to Instance B will still serve stale data. Multi-instance architectures require a centralized, distributed cache such as **Redis** or **Memcached**.
+
+---
+
+# Practical 10: Asynchronous Processing with Event-Driven Architecture
+
+## Objective
+To implement non-blocking background processing in the Task Management backend using Node.js's native `EventEmitter` module without external dependencies. This practical demonstrates decoupling secondary side-effects (such as notifications, logging, and background cleanup) from the critical HTTP request-response cycle, proving that client API requests receive immediate responses while background work completes asynchronously.
+
+---
+
+## Architecture & Flow Diagram
+
+```
+POST /tasks (Client Request)
+        │
+        ▼
+   Save Task to MongoDB Atlas
+        │
+        ▼
+   Invalidate Cache (`tasks_<userId>`)
+        │
+        ├─────────────────────────────────────────────────┐
+        ▼                                                 ▼
+   Send Immediate HTTP 201 Response               Emit 'task-created' Event
+   [API] Response sent at <T1>                            │
+   (Client completes in ~15 ms)                           ▼
+                                                  Notification Listener (`listeners.js`)
+                                                  ├── Logs task creation & user at <T1>
+                                                  └── Starts simulated 2s background job
+                                                          │
+                                                          ▼ (2 seconds later)
+                                                  [Notification] Handler completed at <T1 + 2s>
+```
+
+---
+
+## Implementation Architecture
+
+1. **Dedicated EventEmitter Module ([`events.js`](file:///C:/Users/Admin/OneDrive/Documents/awdf_prac1/student-portfolio/task-manager-api-24IT054/events.js))**:
+   - Created `TaskEvents` extending Node.js's built-in `EventEmitter`.
+   - Exports a single shared instance across the backend application.
+   ```javascript
+   const EventEmitter = require('events');
+   class TaskEvents extends EventEmitter {}
+   module.exports = new TaskEvents();
+   ```
+
+2. **Decoupled Notification Listeners ([`listeners.js`](file:///C:/Users/Admin/OneDrive/Documents/awdf_prac1/student-portfolio/task-manager-api-24IT054/listeners.js))**:
+   - Registered once at server startup inside `server.js` (`require('./listeners');`).
+   - **`task-created` Listener**:
+     - Receives the newly saved task object.
+     - Logs task title, assigned user, and creation timestamp.
+     - Simulates an asynchronous notification delay of 2 seconds (`setTimeout(..., 2000)`).
+     - Logs the completion timestamp after the delay.
+   - **`task-deleted` Listener (Supplementary Problem)**:
+     - Receives deleted task details.
+     - Logs distinct deletion notification and executes simulated background cleanup.
+   - **Safe `error` Event Listener (Supplementary Problem)**:
+     - In Node.js, an unhandled `'error'` event crashes the process. Registering a dedicated `taskEvents.on('error', ...)` listener ensures that any background failure inside a listener is safely caught and logged without affecting the HTTP response or terminating the server.
+
+3. **Non-Blocking Controller Integration ([`server.js`](file:///C:/Users/Admin/OneDrive/Documents/awdf_prac1/student-portfolio/task-manager-api-24IT054/server.js))**:
+   - **`POST /tasks`**:
+     ```javascript
+     const task = await Task.create(taskData);
+     invalidateTaskCache(req.user.id);
+     console.log(`[API] Response sent at ${new Date().toISOString()}`);
+     res.status(201).json(task);
+     taskEvents.emit('task-created', task);
+     ```
+   - **`DELETE /tasks/:id`**:
+     ```javascript
+     const task = await Task.findOneAndDelete(...);
+     invalidateTaskCache(req.user.id, req.params.id);
+     console.log(`[API] Delete response sent at ${new Date().toISOString()}`);
+     res.status(200).json({ message: 'Task deleted successfully', task });
+     taskEvents.emit('task-deleted', task);
+     ```
+
+---
+
+## Verified Console Timestamp Evidence
+
+Actual console output recorded during execution (`node test-events.js`):
+
+```text
+=== Testing Practical 10 Event-Driven Asynchronous Processing ===
+
+--- Test 1: Testing task-created event and 2s async delay ---
+[API] Response sent at 2026-11-01T06:03:36.543Z
+[Notification] Task "Complete Practical 10 Assignment" created at 2026-11-01T06:03:36.544Z (Assigned User: user_24IT054)
+Main thread continues immediately without waiting for background job!
+[Notification] Handler completed at 2026-11-01T06:03:38.548Z
+✔ Test 1 Completed: API responded instantly while notification finished ~2s later.
+
+--- Test 2: Testing task-deleted event ---
+[API] Delete response sent at 2026-11-01T06:03:38.749Z
+[Notification] Task "Completed Practical 10 Assignment" deleted at 2026-11-01T06:03:38.750Z
+[Notification] Deletion cleanup handler completed at 2026-11-01T06:03:39.757Z
+✔ Test 2 Completed: Deletion listener triggered and cleaned up in background.
+
+--- Test 3: Testing safe error handling inside notification listener ---
+[Notification] Task "Failing Task for Error Test" created at 2026-11-01T06:03:39.957Z (Assigned User: user_24IT054)
+[Notification Error] Safely handled event error at 2026-11-01T06:03:41.969Z: Simulated notification delivery failure
+✔ Test 3 Completed: Error was caught, forwarded to error listener, and process did not crash!
+```
+
+### Analysis of Timing Evidence
+- **API Response:** `06:03:36.543Z`
+- **Notification Start:** `06:03:36.544Z` (Synchronous invocation of listener function by `emit()`)
+- **Notification Completion:** `06:03:38.548Z` (**+2.004 seconds** asynchronous execution via Node.js Event Loop timers phase)
+- **Conclusion:** The HTTP client received the 201 Created response immediately without waiting for the 2-second background simulation to finish.
+
+---
+
+## Key Theory & Viva Analysis Questions
+
+1. **Why does emitting an event not block the API response, even though both run on the same Node.js process?**
+   While `emit()` invokes registered listener functions synchronously on the main thread, any asynchronous operation inside the listener (such as `setTimeout`, network I/O, or message publishing) delegates its completion callback to the Node.js Event Loop (Timers / Poll phase). The call stack immediately unwinds, allowing the HTTP response to be flushed to the client without delay.
+
+2. **What would happen to API response time if the notification logic were placed directly inside the POST route?**
+   If the 2-second delay or external notification I/O were awaited directly inside `POST /tasks` before `res.status(201).json(task)`, the HTTP client would experience a latency penalty of at least **2,000 ms** for every task created. Under high traffic, this would tie up request sockets and exhaust server throughput.
+
+3. **Why is `EventEmitter` suitable for this scale, but not for a production system handling millions of events/day?**
+   `EventEmitter` is an in-memory, process-local publish-subscribe mechanism. If the Node.js process crashes or restarts, all pending in-memory events in the event loop are permanently lost (no persistence or message durability). Furthermore, it cannot distribute event workloads across multiple server instances. High-throughput production environments require dedicated distributed message brokers such as **RabbitMQ**, **Apache Kafka**, or **Redis Streams** with persistent queues, worker pools, retries, and dead-letter queues.

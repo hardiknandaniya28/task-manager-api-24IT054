@@ -13,6 +13,8 @@ const Task = require('./models/Task');
 const authMiddleware = require('./middleware/authMiddleware');
 const validateTask = require('./middleware/validateTask');
 const { cache, cacheStats, invalidateTaskCache } = require('./cache');
+const taskEvents = require('./events');
+require('./listeners');
 
 // 2. Configure Express
 const app = express();
@@ -283,7 +285,7 @@ app.get('/tasks/:id', authMiddleware, checkDbConnection, async (req, res, next) 
     }
 });
 
-// POST /tasks: Create task (protected + server-side validation + cache invalidation)
+// POST /tasks: Create task (protected + server-side validation + cache invalidation + async event emission)
 app.post('/tasks', authMiddleware, validateTask, checkDbConnection, async (req, res, next) => {
     try {
         const taskData = {
@@ -292,10 +294,15 @@ app.post('/tasks', authMiddleware, validateTask, checkDbConnection, async (req, 
         };
         const task = await Task.create(taskData);
 
-        // Invalidate user's tasks cache after successful write
+        // Invalidate user's tasks cache after successful write (Practical 9)
         invalidateTaskCache(req.user.id);
 
+        // Log API response timestamp and send immediate 201 response (Practical 10)
+        console.log(`[API] Response sent at ${new Date().toISOString()}`);
         res.status(201).json(task);
+
+        // Emit asynchronous background event AFTER response is sent
+        taskEvents.emit('task-created', task);
     } catch (err) {
         next(err);
     }
@@ -340,7 +347,7 @@ app.put('/tasks/:id', authMiddleware, validateTask, checkDbConnection, async (re
     }
 });
 
-// DELETE /tasks/:id: Delete task (protected + cache invalidation)
+// DELETE /tasks/:id: Delete task (protected + cache invalidation + async event emission)
 app.delete('/tasks/:id', authMiddleware, checkDbConnection, async (req, res, next) => {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) {
@@ -363,13 +370,18 @@ app.delete('/tasks/:id', authMiddleware, checkDbConnection, async (req, res, nex
             });
         }
 
-        // Invalidate both all-tasks cache and single-task cache after successful write
+        // Invalidate both all-tasks cache and single-task cache after successful write (Practical 9)
         invalidateTaskCache(req.user.id, req.params.id);
 
+        // Log API response timestamp and send immediate 200 response (Practical 10)
+        console.log(`[API] Delete response sent at ${new Date().toISOString()}`);
         res.status(200).json({
             message: 'Task deleted successfully',
             task
         });
+
+        // Emit asynchronous background deletion event AFTER response is sent
+        taskEvents.emit('task-deleted', task);
     } catch (err) {
         next(err);
     }
