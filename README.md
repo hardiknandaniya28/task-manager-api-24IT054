@@ -546,3 +546,114 @@ Main thread continues immediately without waiting for background job!
 
 3. **Why is `EventEmitter` suitable for this scale, but not for a production system handling millions of events/day?**
    `EventEmitter` is an in-memory, process-local publish-subscribe mechanism. If the Node.js process crashes or restarts, all pending in-memory events in the event loop are permanently lost (no persistence or message durability). Furthermore, it cannot distribute event workloads across multiple server instances. High-throughput production environments require dedicated distributed message brokers such as **RabbitMQ**, **Apache Kafka**, or **Redis Streams** with persistent queues, worker pools, retries, and dead-letter queues.
+
+---
+
+# Practical 11: Containerization with Docker and Docker Compose
+
+## Objective
+To containerize the full-stack Task Management application (React frontend, Node.js/Express backend, and MongoDB database) using Docker and orchestrate all three interconnected services seamlessly with Docker Compose under a single command.
+
+---
+
+## Multi-Container Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        DOCKER COMPOSE SYSTEM                           │
+│                                                                        │
+│   Host Port: 5173                   Host Port: 5000                    │
+│          ▲                                 ▲                           │
+│          │                                 │                           │
+│   ┌──────┴──────────────┐           ┌──────┴──────────────┐            │
+│   │  Frontend Service   │           │   Backend Service   │            │
+│   │  (React + Nginx)    │           │   (Node/Express)    │            │
+│   │  Container Port 5173│           │  Container Port 5000│            │
+│   └──────────┬──────────┘           └──────────┬──────────┘            │
+│              │                                 │                       │
+│              │     Docker Bridge Network       │                       │
+│              │         (app-network)           │                       │
+│              └────────────────┬────────────────┘                       │
+│                               │                                        │
+│                               ▼                                        │
+│                     ┌───────────────────┐                              │
+│                     │  MongoDB Service  │◄── Named Volume:             │
+│                     │ (Official Mongo)  │    mongo-data (/data/db)     │
+│                     │   Port: 27017     │                              │
+│                     └───────────────────┘                              │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Service Specifications
+
+### 1. Frontend Service (`frontend`)
+- **Base Image**: Multi-stage build (`node:18-alpine` for build, `nginx:alpine` for production).
+- **Configuration**: [`Dockerfile`](file:///C:/Users/Admin/OneDrive/Documents/awdf_prac1/student-portfolio/Dockerfile) & [`nginx.conf`](file:///C:/Users/Admin/OneDrive/Documents/awdf_prac1/student-portfolio/nginx.conf).
+- **Host Port**: `5173` mapped to Container Port `5173`.
+- **Client Routing**: Configured with `try_files $uri $uri/ /index.html;` so React Router paths work without 404 errors.
+
+### 2. Backend Service (`backend`)
+- **Base Image**: `node:18-alpine`.
+- **Configuration**: [`Dockerfile`](file:///C:/Users/Admin/OneDrive/Documents/awdf_prac1/student-portfolio/task-manager-api-24IT054/Dockerfile).
+- **Host Port**: `5000` mapped to Container Port `5000`.
+- **Host Binding**: Express server explicitly binds to `0.0.0.0:5000`.
+- **Database Connection**: Configured with `MONGO_URI=mongodb://mongodb:27017/taskdb` using Docker DNS service discovery. Includes auto-retry logic for resilient startup.
+
+### 3. MongoDB Database Service (`mongodb`)
+- **Official Image**: `mongo:latest`.
+- **Container Port**: `27017` (exposed to host `27017:27017`).
+- **Persistent Volume**: Named volume `mongo-data` mapped to `/data/db`.
+
+---
+
+## Single-Command Orchestration
+
+### 1. Build and Run Entire Application Stack
+```bash
+docker compose up --build
+```
+*(Or `docker-compose up --build`)*
+
+### 2. Verify Running Containers
+```bash
+docker ps
+```
+*Expected Output:*
+```text
+CONTAINER ID   IMAGE                               COMMAND                  PORTS                    NAMES
+a1b2c3d4e5f6   student-portfolio-frontend:latest   "/docker-entrypoint.…"   0.0.0.0:5173->5173/tcp   task-manager-frontend
+b2c3d4e5f6a1   student-portfolio-backend:latest    "docker-entrypoint.s…"   0.0.0.0:5000->5000/tcp   task-manager-backend
+c3d4e5f6a1b2   mongo:latest                        "docker-entrypoint.s…"   0.0.0.0:27017->27017/tcp task-manager-mongodb
+```
+
+### 3. View Aggregated Logs
+```bash
+docker compose logs -f
+```
+Or view specific services:
+```bash
+docker compose logs -f backend
+docker compose logs -f mongodb
+```
+
+### 4. Stop Containers While Preserving MongoDB Data
+```bash
+docker compose down
+```
+> **Data Persistence Guarantee**: `docker compose down` halts and removes containers while preserving the `mongo-data` named volume. When you start the stack again with `docker compose up`, all previously registered users and tasks remain intact.  
+> *(Note: Do NOT run `docker compose down -v` unless you intentionally want to delete all database data).*
+
+---
+
+## Key Theory & Viva Analysis Questions
+
+1. **Why does the backend container reference MongoDB by service name `mongodb` rather than `localhost`?**
+   In Docker, each container has its own isolated network namespace and its own loopback interface (`localhost` / `127.0.0.1`). If the backend connected to `localhost:27017`, it would attempt to find MongoDB inside its own container. Inside an internal Docker bridge network (`app-network`), Docker provides an automatic embedded DNS server that resolves Compose service names (e.g. `mongodb`) to the container's private bridge IP address.
+
+2. **What is the difference between `EXPOSE` in a Dockerfile and the `ports` mapping in `docker-compose.yml`?**
+   `EXPOSE` is informational metadata indicating which port the containerized process listens on internally; it does **not** publish or make the port accessible to the host machine. The `ports` section in `docker-compose.yml` (`HOST:CONTAINER`, e.g. `5000:5000`) instructs the Docker daemon to actively bind host network interfaces to the container's port, enabling external clients and host web browsers to communicate with the service.
+
+3. **Why is it bad practice to copy `node_modules` into a Docker image instead of running `npm install` inside the container?**
+   First, native binaries (such as `bcrypt`) compiled for Windows will fail to execute on Linux-based container architectures. Second, copying gigabytes of host dependencies dramatically slows down Docker build context transfers and bloats image size. Excluded via `.dockerignore`, `npm install` runs cleanly inside the target Linux container environment, compiling native dependencies correctly.
