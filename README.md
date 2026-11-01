@@ -657,3 +657,131 @@ docker compose down
 
 3. **Why is it bad practice to copy `node_modules` into a Docker image instead of running `npm install` inside the container?**
    First, native binaries (such as `bcrypt`) compiled for Windows will fail to execute on Linux-based container architectures. Second, copying gigabytes of host dependencies dramatically slows down Docker build context transfers and bloats image size. Excluded via `.dockerignore`, `npm install` runs cleanly inside the target Linux container environment, compiling native dependencies correctly.
+
+---
+
+# Practical 12: CI/CD Pipeline with GitHub Actions
+
+[![CI Pipeline](https://github.com/hardiknandaniya28/task-manager-api-24IT054/actions/workflows/ci.yml/badge.svg)](https://github.com/hardiknandaniya28/task-manager-api-24IT054/actions/workflows/ci.yml)
+
+## Objective
+To implement an automated Continuous Integration (CI) pipeline using **GitHub Actions** that automatically triggers on every push and pull request to the `main` branch, provisions an Ubuntu runner with Node.js 18, installs backend dependencies (`npm install`), executes an automated test suite (`npm test`), and reports a clear pass/fail status directly on GitHub.
+
+---
+
+## CI/CD Pipeline Architecture
+
+```
+Developer Push to 'main'
+         │
+         ▼
+GitHub Actions Trigger (`.github/workflows/ci.yml`)
+         │
+         ▼
+Job: Backend tests (runs-on: ubuntu-latest)
+ ├── 1. Checkout repository code (actions/checkout@v4)
+ ├── 2. Set up Node.js 18 runtime with npm cache (actions/setup-node@v4)
+ ├── 3. Install dependencies (`npm install`)
+ └── 4. Execute test suite (`npm test`)
+         │
+         ├─── [ALL TESTS PASS] ──► ✅ Green Checkmark (Pipeline Passed)
+         └─── [ANY TEST FAILS] ──► ❌ Red X (Pipeline Failed & Logs Reported)
+```
+
+---
+
+## Automated Test Suite Breakdown (`tests/tasks.test.js`)
+
+The backend includes 9 automated tests built with `node:test`, `node:assert/strict`, and `supertest`:
+
+| # | Test Name | Target Layer | Verification |
+| :- | :--- | :--- | :--- |
+| 1 | `validateRegisterInput rejects missing email` | Middleware (`/register`) | Rejects missing email with HTTP 400 |
+| 2 | `validateLoginInput accepts valid credentials` | Middleware (`/login`) | Rejects empty credentials with HTTP 400 |
+| 3 | `validateTaskPayload rejects empty title` | Middleware (`validateTask`) | Rejects whitespace/empty title with HTTP 400 |
+| 4 | `validators reject non-object request bodies` | Express body parser | Rejects non-JSON payloads with HTTP 400 |
+| 5 | `validateTaskUpdatePayload rejects invalid fields` | Middleware (`validateTask`) | Rejects invalid priority enums with HTTP 400 |
+| 6 | `buildAuthToken returns a JWT expiring in 1 hour` | Authentication (`jwt`) | Verifies `exp - iat === 3600` seconds |
+| 7 | `GET /health returns the backend service status` | REST API (`/health`) | Verifies HTTP 200 and `{ status: 'ok' }` |
+| 8 | `GET /tasks rejects requests without authentication` | Auth Middleware | Unauthenticated requests return HTTP 401 |
+| 9 | `GET /tasks returns tasks for an authenticated request` | Cache & Tasks API | Authenticated request with Bearer token returns HTTP 200 and task array |
+
+---
+
+## Local Verification Output
+
+Execution command in `student-portfolio/task-manager-api-24IT054`:
+```powershell
+npm test
+```
+
+### 1. Successful Test Run (All 9 Passed)
+```text
+> task-manager-api-24it054@1.0.0 test
+> node --test tests/*.test.js
+
+POST /register - 2026-11-01T11:00:26.454Z
+▶ Task Manager API - Automated Test Suite
+  ✔ validateRegisterInput rejects missing email (46.4614ms)
+POST /login - 2026-11-01T11:00:26.488Z
+  ✔ validateLoginInput accepts valid credentials (6.3418ms)
+  ✔ validateTaskPayload rejects empty title (0.402ms)
+POST /tasks - 2026-11-01T11:00:26.494Z
+  ✔ validators reject non-object request bodies (4.2257ms)
+  ✔ validateTaskUpdatePayload rejects invalid fields before persistence (0.2667ms)
+  ✔ buildAuthToken returns a JWT that expires in one hour (2.2268ms)
+GET /health - 2026-11-01T11:00:26.501Z
+  ✔ GET /health returns the backend service status (4.3733ms)
+GET /tasks - 2026-11-01T11:00:26.505Z
+  ✔ GET /tasks rejects requests without authentication (4.0735ms)
+GET /tasks - 2026-11-01T11:00:26.510Z
+  ✔ GET /tasks returns tasks for an authenticated request (5.6857ms)
+✔ Task Manager API - Automated Test Suite (75.4824ms)
+ℹ tests 9
+ℹ suites 1
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1215.37
+```
+
+### 2. Deliberately Failed Test Demonstration
+When temporarily asserting `status: 'failed'` in `GET /health`:
+```text
+  ✖ GET /health returns the backend service status (7.3216ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  'ok' !== 'failed'
+  
+      at TestContext.<anonymous> (tests\tasks.test.js:95:16)
+  
+    code: 'ERR_ASSERTION',
+    actual: 'ok',
+    expected: 'failed',
+    operator: 'strictEqual'
+
+ℹ tests 9
+ℹ pass 8
+ℹ fail 1
+```
+The test failure cleanly halts the process with exit code 1, which causes GitHub Actions to mark the job with a **Red X**. Once restored to `'ok'`, the workflow turns **Green**.
+
+---
+
+## Continuous Integration (CI) vs. Continuous Deployment (CD)
+
+* **Continuous Integration (CI)**: Automatically builds, lints, and tests every code commit pushed to the repository. The goal is early bug detection and ensuring that new changes do not break existing functionality.
+* **Continuous Deployment (CD)**: Automatically deploys code that has successfully passed all CI testing stages directly to a staging or production hosting environment (e.g. AWS, Render, Railway, Kubernetes) without manual human intervention.
+* **Which does this practical demonstrate?**: This practical demonstrates **Continuous Integration (CI)** because the workflow automates dependency installation and test validation on GitHub-hosted runners, but does not deploy the container to an external hosting provider.
+
+---
+
+## Key Theory & Viva Analysis Questions
+
+1. **Why does running tests automatically on every push catch problems earlier than testing manually before a release?**
+   Manual testing before a release is infrequent, error-prone, and evaluates large batches of combined changes, making it difficult to isolate which commit introduced a bug. Automated CI tests every granular commit in isolation within seconds, immediately notifying the developer of regressions while the code context is still fresh in their mind.
+
+2. **What would happen to the pipeline if the test file path were incorrect? Would the workflow fail at the same step as a genuine test failure?**
+   If the test file path were incorrect (e.g. `tests/*.spec.js` when files are named `*.test.js`), `node --test` would report 0 tests found. If configured to fail on empty test suites, it fails at the `Run automated test suite` step, but the error message indicates file discovery failure rather than an `AssertionError`. In contrast, a genuine test failure executes the test runner successfully but fails on an unsatisfied expectation (e.g. `AssertionError: 'ok' !== 'failed'`).

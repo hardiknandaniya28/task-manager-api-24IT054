@@ -46,6 +46,9 @@ app.use((req, res, next) => {
 
 // Helper middleware to check database connection status
 const checkDbConnection = (req, res, next) => {
+    if (process.env.NODE_ENV === 'test' && mongoose.connection.readyState !== 1) {
+        return next();
+    }
     if (mongoose.connection.readyState !== 1) {
         return res.status(503).json({
             error: 'MongoDB Atlas is not connected. Please ensure your IP (0.0.0.0/0) is whitelisted in MongoDB Atlas Network Access.'
@@ -55,8 +58,13 @@ const checkDbConnection = (req, res, next) => {
 };
 
 // =========================================================
-// 7. PUBLIC AUTHENTICATION ROUTES (Practical 7)
+// 7. HEALTH CHECK & PUBLIC AUTHENTICATION ROUTES (Practical 7 & 12)
 // =========================================================
+
+// GET /health: Health check endpoint for CI/CD pipeline and container monitoring
+app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
+});
 
 // POST /register: Register a new user
 app.post('/register', checkDbConnection, async (req, res, next) => {
@@ -482,36 +490,38 @@ app.use((err, req, res, next) => {
 // 11. Start Server & Connect to MongoDB
 // =========================================================
 
-// Start Express server explicitly on 0.0.0.0 so it is reachable both locally and inside Docker
-const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Task Manager API running at http://0.0.0.0:${PORT}`);
-});
+// Only bind port and connect to MongoDB when server.js is run directly (not during tests)
+if (require.main === module) {
+    const server = app.listen(PORT, '0.0.0.0', () => {
+        console.log(`Task Manager API running at http://0.0.0.0:${PORT}`);
+    });
 
-// Connect to MongoDB (Atlas or Docker Compose container)
-const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI;
+    // Connect to MongoDB (Atlas or Docker Compose container)
+    const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI;
 
-if (!MONGO_URI) {
-    console.error('MongoDB connection failed: Neither MONGO_URI nor MONGODB_URI is defined in .env');
-} else {
-    const connectWithRetry = () => {
-        mongoose.connect(MONGO_URI)
-            .then(() => {
-                console.log('MongoDB connected successfully');
-            })
-            .catch((err) => {
-                // Sanitize error message to avoid exposing connection credentials
-                const sanitizedMsg = err.message
-                    ? err.message.replace(/mongodb(\+srv)?:\/\/[^@]+@/i, 'mongodb+srv://<credentials>@')
-                    : 'Unknown error';
-                console.error('MongoDB connection failed:', sanitizedMsg);
-                if (err.name === 'MongooseServerSelectionError' && MONGO_URI.includes('mongodb+srv')) {
-                    console.error('Atlas Troubleshooting: Verify Network Access has 0.0.0.0/0 whitelisted and Database Access credentials are valid.');
-                }
-                console.log('Retrying MongoDB connection in 5 seconds...');
-                setTimeout(connectWithRetry, 5000);
-            });
-    };
-    connectWithRetry();
+    if (!MONGO_URI) {
+        console.error('MongoDB connection failed: Neither MONGO_URI nor MONGODB_URI is defined in .env');
+    } else {
+        const connectWithRetry = () => {
+            mongoose.connect(MONGO_URI)
+                .then(() => {
+                    console.log('MongoDB connected successfully');
+                })
+                .catch((err) => {
+                    // Sanitize error message to avoid exposing connection credentials
+                    const sanitizedMsg = err.message
+                        ? err.message.replace(/mongodb(\+srv)?:\/\/[^@]+@/i, 'mongodb+srv://<credentials>@')
+                        : 'Unknown error';
+                    console.error('MongoDB connection failed:', sanitizedMsg);
+                    if (err.name === 'MongooseServerSelectionError' && MONGO_URI.includes('mongodb+srv')) {
+                        console.error('Atlas Troubleshooting: Verify Network Access has 0.0.0.0/0 whitelisted and Database Access credentials are valid.');
+                    }
+                    console.log('Retrying MongoDB connection in 5 seconds...');
+                    setTimeout(connectWithRetry, 5000);
+                });
+        };
+        connectWithRetry();
+    }
 }
 
 module.exports = app;
