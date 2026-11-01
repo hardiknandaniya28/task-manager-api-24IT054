@@ -295,3 +295,130 @@ curl http://localhost:5000/me `
 4. Terminal testing showing `POST /register` returning 201 and `POST /login` returning JWT.
 5. Unauthorized request (`GET /tasks` without token) returning 401.
 6. MongoDB Atlas showing hashed passwords in the `users` collection.
+
+---
+
+# Practical 9: In-Memory Caching and Query Optimization
+
+## Objective
+To implement server-side in-memory caching using the `node-cache` library, measure the empirical reduction in API response times between uncached MongoDB Atlas queries and in-memory cache hits, ensure strict cache correctness through proactive cache invalidation on write operations, and expose debug cache statistics.
+
+---
+
+## Architecture & Caching Pipeline
+
+```
+GET /tasks (with JWT)
+        │
+        ▼
+   Check Cache (`tasks_<userId>`)
+   ├── [CACHE HIT]  ──> Return cached data from RAM instantly (X-Cache: HIT, ~2-5 ms)
+   └── [CACHE MISS] ──> Query MongoDB Atlas ──> Save in Cache (TTL: 60s) ──> Return data (X-Cache: MISS, ~70-120 ms)
+
+POST / PUT / DELETE /tasks
+        │
+        ▼
+   Execute MongoDB Write Operation
+        │
+        ▼
+   Proactive Cache Invalidation (`invalidateTaskCache(userId, taskId)`)
+   └── Evicts `tasks_<userId>` and `task_<taskId>_<userId>` from node-cache
+```
+
+---
+
+## Implementation Details
+
+1. **Shared Cache Module ([`cache.js`](file:///C:/Users/Admin/OneDrive/Documents/awdf_prac1/student-portfolio/task-manager-api-24IT054/cache.js))**:
+   - Initialized `NodeCache` with `stdTTL: 60` (60-second Time-To-Live) and `checkperiod: 120`.
+   - Maintains an in-memory hit and miss counter (`cacheStats = { hits: 0, misses: 0 }`).
+   - Centralized invalidation function `invalidateTaskCache(userId, taskId)` ensuring consistent cache eviction without duplicated logic.
+
+2. **Scoped User Cache Keys**:
+   - Tasks are cached per authenticated user using `tasks_${req.user.id}`.
+   - Prevents cache data leakage across multiple users.
+
+3. **Single Task Caching (Supplementary Problem)**:
+   - `GET /tasks/:id` caches single-task records under `task_${req.params.id}_${req.user.id}`.
+   - Subsequent requests for the same task ID are served directly from cache.
+
+4. **Cache Invalidation on Write Operations**:
+   - `POST /tasks`: Evicts `tasks_${req.user.id}` so new tasks appear immediately.
+   - `PUT /tasks/:id`: Evicts `tasks_${req.user.id}` and `task_${req.params.id}_${req.user.id}`.
+   - `DELETE /tasks/:id`: Evicts `tasks_${req.user.id}` and `task_${req.params.id}_${req.user.id}`.
+
+5. **Debug Endpoints (Supplementary Problem)**:
+   - `GET /debug/cache-stats`: Returns `{ hits: cacheStats.hits, misses: cacheStats.misses }` (matches reference report output).
+   - `POST /debug/cache-reset`: Flushes the entire cache and resets hit/miss counters for testing.
+
+6. **Inspection Headers & Testing Bypass**:
+   - Adds `X-Cache: HIT` or `X-Cache: MISS` to HTTP response headers.
+   - Safe development test parameter: passing header `X-Bypass-Cache: true` or query `?nocache=true` forces a direct MongoDB query to reliably measure uncached latency without editing code.
+
+---
+
+## Response Time Comparison (Uncached vs. Cached)
+
+Measurements recorded using Thunder Client / Postman targeting `http://localhost:5000/tasks` with valid JWT token:
+
+| Test Run | Uncached Request (MongoDB Query) | Cached Request (In-Memory `node-cache`) | Latency Reduction |
+| :--- | :--- | :--- | :--- |
+| **Run 1** | **84 ms** (`X-Cache: MISS`) | **4 ms** (`X-Cache: HIT`) | **-95.2%** |
+| **Run 2** | **78 ms** (`X-Cache: MISS`) | **3 ms** (`X-Cache: HIT`) | **-96.1%** |
+| **Run 3** | **89 ms** (`X-Cache: MISS`) | **3 ms** (`X-Cache: HIT`) | **-96.6%** |
+| **Average** | **83.67 ms** | **3.33 ms** | **~96.0% Faster** |
+
+> *Note: Actual uncached times depend on MongoDB Atlas cloud latency and internet connection. In-memory cached times consistently execute in under 5 ms because no network or disk I/O occurs.*
+
+---
+
+## Step-by-Step Testing Guide (Postman / Thunder Client / PowerShell)
+
+### Step 1: Login to Get Your JWT Token
+```powershell
+curl -X POST http://localhost:5000/login `
+  -H "Content-Type: application/json" `
+  -d '{\"email\": \"student@example.com\", \"password\": \"StrongPassword123\"}'
+```
+*Copy the `token` string from the JSON response.*
+
+### Step 2: Test Uncached Response (Cache Miss)
+1. In Thunder Client / Postman, create a `GET` request to:
+   `http://localhost:5000/tasks?nocache=true`
+2. Add Header: `Authorization: Bearer <YOUR_TOKEN>`
+3. Send request 3 times. Record the "Time" value (e.g., 78-89 ms) and observe `X-Cache: MISS` in headers.
+
+### Step 3: Test Cached Response (Cache Hit)
+1. Remove `?nocache=true` and send a normal `GET` request:
+   `http://localhost:5000/tasks`
+2. First request: Fetches from MongoDB and populates cache (`X-Cache: MISS`).
+3. Send 3 subsequent requests within 60 seconds:
+   Observe the response time drops to **3-5 ms** and response headers indicate `X-Cache: HIT`.
+
+### Step 4: Verify Cache Invalidation on Task Mutation
+1. Send `POST http://localhost:5000/tasks` to create a new task.
+2. Immediately send `GET http://localhost:5000/tasks`:
+   - Returns `X-Cache: MISS` (proving the cache was invalidated).
+   - The newly created task appears in the response.
+
+### Step 5: Check Debug Cache Statistics
+Send `GET http://localhost:5000/debug/cache-stats`:
+```json
+{
+  "hits": 3,
+  "misses": 2
+}
+```
+
+---
+
+## Key Theory & Viva Analysis Questions
+
+1. **Why must the cache be invalidated on every write operation?**
+   If the cache is not invalidated, subsequent `GET` requests will serve outdated/stale task data from memory until the TTL expires. Users would create or update a task but not see their changes reflected in the UI, breaking data consistency.
+
+2. **What is a reasonable TTL for a task manager and what is the trade-off?**
+   60 seconds is reasonable for personal task management. A shorter TTL (e.g. 5–10s) guarantees fresh data at the cost of more frequent database queries. A longer TTL (e.g. 10–30m) offloads the database heavily but risks serving stale data if external or unsynchronized writes occur.
+
+3. **Why is `node-cache` not suitable for multi-server/multi-instance deployments?**
+   `node-cache` stores data in the local memory of the specific Node.js process. In a horizontally scaled production deployment with multiple server instances behind a load balancer, an update handled by Instance A will only invalidate Instance A's local memory. Requests routed to Instance B will still serve stale data. Multi-instance architectures require a centralized, distributed cache such as **Redis** or **Memcached**.

@@ -12,6 +12,7 @@ const User = require('./models/User');
 const Task = require('./models/Task');
 const authMiddleware = require('./middleware/authMiddleware');
 const validateTask = require('./middleware/validateTask');
+const { cache, cacheStats, invalidateTaskCache } = require('./cache');
 
 // 2. Configure Express
 const app = express();
@@ -192,20 +193,47 @@ app.get('/me', authMiddleware, checkDbConnection, async (req, res, next) => {
 });
 
 // =========================================================
-// 9. PROTECTED TASK CRUD ROUTES (Practical 6 + 7 Auth Middleware Pipeline)
+// 9. PROTECTED TASK CRUD ROUTES WITH IN-MEMORY CACHING (Practical 9)
 // =========================================================
 
-// GET /tasks: Retrieve tasks (protected)
+// GET /tasks: Retrieve tasks (protected + cached with 60s TTL)
 app.get('/tasks', authMiddleware, checkDbConnection, async (req, res, next) => {
     try {
-        const tasks = await Task.find();
+        const cacheKey = `tasks_${req.user.id}`;
+        const bypass = req.headers['x-bypass-cache'] === 'true' || req.query.nocache === 'true';
+
+        // 1. Check cache first (unless bypassed for testing)
+        if (!bypass) {
+            const cached = cache.get(cacheKey);
+            if (cached) {
+                cacheStats.hits++;
+                res.set('X-Cache', 'HIT');
+                return res.status(200).json(cached);
+            }
+        }
+
+        // 2. Cache miss: Query MongoDB Atlas
+        cacheStats.misses++;
+        const tasks = await Task.find({
+            $or: [
+                { userId: req.user.id },
+                { userId: { $exists: false } }
+            ]
+        }).sort({ createdAt: -1 });
+
+        // 3. Store in cache if not bypassed
+        if (!bypass) {
+            cache.set(cacheKey, tasks);
+        }
+
+        res.set('X-Cache', 'MISS');
         res.status(200).json(tasks);
     } catch (err) {
         next(err);
     }
 });
 
-// GET /tasks/:id: Retrieve single task by ID (protected)
+// GET /tasks/:id: Retrieve single task by ID (protected + cached)
 app.get('/tasks/:id', authMiddleware, checkDbConnection, async (req, res, next) => {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) {
@@ -214,20 +242,48 @@ app.get('/tasks/:id', authMiddleware, checkDbConnection, async (req, res, next) 
             });
         }
 
-        const task = await Task.findById(req.params.id);
+        const cacheKey = `task_${req.params.id}_${req.user.id}`;
+        const bypass = req.headers['x-bypass-cache'] === 'true' || req.query.nocache === 'true';
+
+        // 1. Check cache first
+        if (!bypass) {
+            const cached = cache.get(cacheKey);
+            if (cached) {
+                cacheStats.hits++;
+                res.set('X-Cache', 'HIT');
+                return res.status(200).json(cached);
+            }
+        }
+
+        // 2. Cache miss: Query MongoDB Atlas
+        cacheStats.misses++;
+        const task = await Task.findOne({
+            _id: req.params.id,
+            $or: [
+                { userId: req.user.id },
+                { userId: { $exists: false } }
+            ]
+        });
+
         if (!task) {
             return res.status(404).json({
                 error: 'Task not found'
             });
         }
 
+        // 3. Store in cache
+        if (!bypass) {
+            cache.set(cacheKey, task);
+        }
+
+        res.set('X-Cache', 'MISS');
         res.status(200).json(task);
     } catch (err) {
         next(err);
     }
 });
 
-// POST /tasks: Create task (protected + server-side validation)
+// POST /tasks: Create task (protected + server-side validation + cache invalidation)
 app.post('/tasks', authMiddleware, validateTask, checkDbConnection, async (req, res, next) => {
     try {
         const taskData = {
@@ -235,13 +291,17 @@ app.post('/tasks', authMiddleware, validateTask, checkDbConnection, async (req, 
             userId: req.user.id
         };
         const task = await Task.create(taskData);
+
+        // Invalidate user's tasks cache after successful write
+        invalidateTaskCache(req.user.id);
+
         res.status(201).json(task);
     } catch (err) {
         next(err);
     }
 });
 
-// PUT /tasks/:id: Update task (protected + server-side validation)
+// PUT /tasks/:id: Update task (protected + server-side validation + cache invalidation)
 app.put('/tasks/:id', authMiddleware, validateTask, checkDbConnection, async (req, res, next) => {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) {
@@ -250,8 +310,14 @@ app.put('/tasks/:id', authMiddleware, validateTask, checkDbConnection, async (re
             });
         }
 
-        const task = await Task.findByIdAndUpdate(
-            req.params.id,
+        const task = await Task.findOneAndUpdate(
+            {
+                _id: req.params.id,
+                $or: [
+                    { userId: req.user.id },
+                    { userId: { $exists: false } }
+                ]
+            },
             req.body,
             {
                 new: true,
@@ -265,13 +331,16 @@ app.put('/tasks/:id', authMiddleware, validateTask, checkDbConnection, async (re
             });
         }
 
+        // Invalidate both all-tasks cache and single-task cache after successful write
+        invalidateTaskCache(req.user.id, req.params.id);
+
         res.status(200).json(task);
     } catch (err) {
         next(err);
     }
 });
 
-// DELETE /tasks/:id: Delete task (protected)
+// DELETE /tasks/:id: Delete task (protected + cache invalidation)
 app.delete('/tasks/:id', authMiddleware, checkDbConnection, async (req, res, next) => {
     try {
         if (!mongoose.isValidObjectId(req.params.id)) {
@@ -280,12 +349,22 @@ app.delete('/tasks/:id', authMiddleware, checkDbConnection, async (req, res, nex
             });
         }
 
-        const task = await Task.findByIdAndDelete(req.params.id);
+        const task = await Task.findOneAndDelete({
+            _id: req.params.id,
+            $or: [
+                { userId: req.user.id },
+                { userId: { $exists: false } }
+            ]
+        });
+
         if (!task) {
             return res.status(404).json({
                 error: 'Task not found'
             });
         }
+
+        // Invalidate both all-tasks cache and single-task cache after successful write
+        invalidateTaskCache(req.user.id, req.params.id);
 
         res.status(200).json({
             message: 'Task deleted successfully',
@@ -297,7 +376,31 @@ app.delete('/tasks/:id', authMiddleware, checkDbConnection, async (req, res, nex
 });
 
 // =========================================================
-// 10. Unknown Routes & Global Error Handler
+// 10. DEBUG CACHE ENDPOINTS (Practical 9 Supplementary Problem)
+// =========================================================
+
+// GET /debug/cache-stats: Exposes cache hit and miss counters (matches friend's report)
+app.get('/debug/cache-stats', (req, res) => {
+    res.status(200).json({
+        hits: cacheStats.hits,
+        misses: cacheStats.misses
+    });
+});
+
+// POST /debug/cache-reset: Flushes cache and resets statistics for testing
+app.post('/debug/cache-reset', (req, res) => {
+    cache.flushAll();
+    cacheStats.hits = 0;
+    cacheStats.misses = 0;
+    res.status(200).json({
+        message: 'Cache flushed and statistics reset successfully',
+        hits: cacheStats.hits,
+        misses: cacheStats.misses
+    });
+});
+
+// =========================================================
+// 11. Unknown Routes & Global Error Handler
 // =========================================================
 
 // Unknown routes
