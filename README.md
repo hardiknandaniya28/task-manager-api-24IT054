@@ -785,3 +785,166 @@ The test failure cleanly halts the process with exit code 1, which causes GitHub
 
 2. **What would happen to the pipeline if the test file path were incorrect? Would the workflow fail at the same step as a genuine test failure?**
    If the test file path were incorrect (e.g. `tests/*.spec.js` when files are named `*.test.js`), `node --test` would report 0 tests found. If configured to fail on empty test suites, it fails at the `Run automated test suite` step, but the error message indicates file discovery failure rather than an `AssertionError`. In contrast, a genuine test failure executes the test runner successfully but fails on an unsatisfied expectation (e.g. `AssertionError: 'ok' !== 'failed'`).
+
+
+---
+
+# Practical 13: AI API Integration into a Web Application
+
+## Objective
+To integrate an external Artificial Intelligence API into the existing full-stack Task Management application. Practical 13 adds an **AI Generate Task Description** feature using OpenAI (`gpt-4o-mini`), allowing users to automatically generate concise, practical task descriptions based on the task title while adhering to critical security principles, graceful degradation, rate limiting, and human-in-the-loop review.
+
+---
+
+## Architectural Workflow & Security Design
+
+```
+┌────────────────────────────────────────────────────────┐
+│  React Frontend (TaskForm.jsx)                         │
+│  - User types Task Title                               │
+│  - Clicks "Generate description"                       │
+│  - Disabled state: "Generating description..."         │
+└───────────────────────────┬────────────────────────────┘
+                            │
+                            │ POST /api/ai/generate-description
+                            │ Headers: Authorization: Bearer <JWT>
+                            │ Body: { title: "Prepare AI Integration Report" }
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│  Express Backend (server.js)                           │
+│  1. authMiddleware validates JWT identity              │
+│  2. Validates title (rejects blank with HTTP 400)      │
+│  3. Rate Limiter: 1 request/minute per task title      │
+│  4. Safe Key Check: Graceful fallback if key unset     │
+│  5. OpenAI SDK calls gpt-4o-mini (max_tokens: 80)      │
+└───────────────────────────┬────────────────────────────┘
+                            │
+                            │ HTTP 200 JSON
+                            │ { description: "...", fallback: false }
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│  React Frontend State & UI                             │
+│  - Populates editable description field                │
+│  - Displays toast notification                         │
+│  - Displays disclaimer: "AI-generated suggestions      │
+│    are editable and should be reviewed before saving." │
+│  - User reviews/edits text                             │
+│  - User clicks "Add Task" to persist to MongoDB        │
+└────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Key Implementation Features
+
+### 1. API Key Isolation (Zero Frontend Exposure)
+The OpenAI API key is stored exclusively in the backend `.env` file (`OPENAI_API_KEY`). The React frontend never possesses, transmits, or logs the API key. All communication is routed through the authenticated Express proxy endpoint (`/api/ai/generate-description`).
+
+### 2. In-Memory Rate Limiting
+To prevent abuse and unexpected API billing, the backend enforces an in-memory rate limit using a hash map key:
+```javascript
+const rateLimitKey = `${req.user.id}:${title.toLowerCase()}`;
+```
+Requests made within 60 seconds for the same task title immediately return `HTTP 429 Too Many Requests`:
+```json
+{
+  "error": "Please wait one minute before generating another description for this task."
+}
+```
+
+### 3. Graceful Degradation & Fallback Strategy
+If the AI service is unavailable, the API key is not configured, or quota is exhausted, the application never crashes:
+- The backend catches any errors and returns `HTTP 200` with:
+  ```json
+  {
+    "description": "AI suggestions are unavailable. Please add a description manually.",
+    "fallback": true
+  }
+  ```
+- The frontend detects `fallback: true`, displays a notice toast, and allows the user to edit the manual fallback text or write their own description.
+
+### 4. Human-in-the-Loop Editable Suggestion
+The AI response does not directly create the task in MongoDB. Instead, it populates the description input field, allowing the user to inspect, modify, or completely rewrite the text before clicking **Add Task**.
+
+---
+
+## Backend Endpoint Specification
+
+### `POST /api/ai/generate-description`
+- **Authentication**: Required (`Bearer <JWT>`)
+- **Headers**: `Content-Type: application/json`
+- **Request Body**:
+  ```json
+  {
+    "title": "Prepare AI Integration Report"
+  }
+  ```
+- **Success Response (HTTP 200)**:
+  ```json
+  {
+    "description": "Draft the practical report documenting the OpenAI API endpoint integration, rate limiting logic, error fallbacks, and React UI screenshots.",
+    "fallback": false
+  }
+  ```
+- **Fallback Response (HTTP 200)**:
+  ```json
+  {
+    "description": "AI suggestions are unavailable. Please add a description manually.",
+    "fallback": true
+  }
+  ```
+- **Rate Limit Response (HTTP 429)**:
+  ```json
+  {
+    "error": "Please wait one minute before generating another description for this task."
+  }
+  ```
+- **Validation Error (HTTP 400)**:
+  ```json
+  {
+    "error": "Task title is required"
+  }
+  ```
+
+---
+
+## Automated Test Verification
+
+All 13 automated tests run cleanly via `npm test`:
+
+```text
+> task-manager-api-24it054@1.0.0 test
+> node --test tests/*.test.js
+
+▶ Task Manager API - Automated Test Suite
+  ✔ validateRegisterInput rejects missing email
+  ✔ validateLoginInput accepts valid credentials
+  ✔ validateTaskPayload rejects empty title
+  ✔ validators reject non-object request bodies
+  ✔ validateTaskUpdatePayload rejects invalid fields before persistence
+  ✔ buildAuthToken returns a JWT that expires in one hour
+  ✔ GET /health returns the backend service status
+  ✔ GET /tasks rejects requests without authentication
+  ✔ GET /tasks returns tasks for an authenticated request
+  ✔ POST /api/ai/generate-description rejects unauthenticated requests
+  ✔ POST /api/ai/generate-description validates required title
+  ✔ POST /api/ai/generate-description provides graceful fallback when API key is empty
+  ✔ POST /api/ai/generate-description enforces rate limiting per task title
+✔ Task Manager API - Automated Test Suite (13 passed, 0 failed)
+```
+
+---
+
+## Viva & Theoretical Review Questions
+
+### 1. Why must the AI API key only reside on the backend and never be included in the frontend?
+Frontend code executes on the client's browser. Any environment variable bundled into the client build (e.g. `VITE_` or plain constants) is visible in plain text via browser Developer Tools, Network tabs, or compiled JavaScript bundles. Exposing a secret API key allows unauthorized third parties to steal credentials, exhaust API quotas, and incur financial costs. By routing requests through an Express backend proxy, the secret key remains securely on the server and is accessed only after the client has passed authentication.
+
+### 2. How does graceful degradation protect the user experience when an external AI API experiences downtime or quota exhaustion?
+Third-party APIs are subject to network latencies, outages, and billing caps. Graceful degradation ensures that a failure in the AI service does not break the core task management capabilities of the web application. When the AI call fails or times out, the backend catches the exception and returns a fallback structure (`fallback: true`). The React UI then informs the user and allows manual input, preserving normal workflow without crashes or blocking errors.
+
+### 3. Why should AI suggestions be editable by the user rather than auto-submitted to the database?
+AI models can produce hallucinations, irrelevant suggestions, or inaccurate wording. Following the "Human-in-the-Loop" design pattern ensures that users retain full control and accountability over data stored in their application. By treating AI output as a draft suggestion in an editable text field, users can review, correct, or enhance the description before finalizing the task.
+
+### 4. What is the purpose of rate limiting on an AI endpoint?
+AI model completions are computationally intensive and cost money per token consumed. Without rate limiting, malicious users or automated loops could spam the endpoint, causing denial of service (DoS) or rapid exhaustion of account credits. Enforcing a rate limit (e.g., 1 request per task per minute) prevents abuse, throttles runaway client requests, and stabilizes server performance.

@@ -126,4 +126,72 @@ describe('Task Manager API - Automated Test Suite', () => {
         assert.strictEqual(res.body[0].title, 'Automated CI Task');
     });
 
+    // 5. AI Description Generation Integration Tests (Practical 13)
+    test('POST /api/ai/generate-description rejects unauthenticated requests', async () => {
+        const res = await request(app)
+            .post('/api/ai/generate-description')
+            .send({ title: 'Complete AI Integration' });
+
+        assert.strictEqual(res.statusCode, 401);
+        assert.match(res.body.error, /Access denied/i);
+    });
+
+    test('POST /api/ai/generate-description validates required title', async () => {
+        const testToken = jwt.sign(
+            { id: 'ai_test_user_1', email: 'aitest@example.com' },
+            process.env.JWT_SECRET,
+            { expiresIn: '1h' }
+        );
+
+        const res = await request(app)
+            .post('/api/ai/generate-description')
+            .set('Authorization', `Bearer ${testToken}`)
+            .send({ title: '   ' });
+
+        assert.strictEqual(res.statusCode, 400);
+        assert.match(res.body.error, /Task title is required/i);
+    });
+
+    test('POST /api/ai/generate-description provides graceful fallback when API key is empty', async () => {
+        const testToken = jwt.sign(
+            { id: 'ai_test_user_2', email: 'aitest2@example.com' },
+            process.env.JWT_SECRET,
+            { expiresIn: '1h' }
+        );
+
+        const res = await request(app)
+            .post('/api/ai/generate-description')
+            .set('Authorization', `Bearer ${testToken}`)
+            .send({ title: 'Design Database Schema' });
+
+        assert.strictEqual(res.statusCode, 200);
+        assert.strictEqual(res.body.fallback, true);
+        assert.match(res.body.description, /AI suggestions are unavailable/i);
+    });
+
+    test('POST /api/ai/generate-description enforces rate limiting per task title', async () => {
+        const testToken = jwt.sign(
+            { id: 'ai_test_user_rate_limit', email: 'airatelimit@example.com' },
+            process.env.JWT_SECRET,
+            { expiresIn: '1h' }
+        );
+
+        // First call sets timestamp
+        const res1 = await request(app)
+            .post('/api/ai/generate-description')
+            .set('Authorization', `Bearer ${testToken}`)
+            .send({ title: 'Unique Task for Rate Limit' });
+
+        assert.strictEqual(res1.statusCode, 200);
+
+        // Immediate second call with same title must trigger 429
+        const res2 = await request(app)
+            .post('/api/ai/generate-description')
+            .set('Authorization', `Bearer ${testToken}`)
+            .send({ title: 'Unique Task for Rate Limit' });
+
+        assert.strictEqual(res2.statusCode, 429);
+        assert.match(res2.body.error, /Please wait one minute/i);
+    });
+
 });

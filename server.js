@@ -15,6 +15,11 @@ const validateTask = require('./middleware/validateTask');
 const { cache, cacheStats, invalidateTaskCache } = require('./cache');
 const taskEvents = require('./events');
 require('./listeners');
+const OpenAI = require('openai');
+
+// Rate limiting map for AI description requests (Practical 13)
+const aiRequestTimes = new Map();
+const AI_RATE_LIMIT_MS = 60000;
 
 // 2. Configure Express
 const app = express();
@@ -420,7 +425,71 @@ app.post('/debug/cache-reset', (req, res) => {
 });
 
 // =========================================================
-// 11. Unknown Routes & Global Error Handler
+// 11. AI INTEGRATION ENDPOINTS (Practical 13)
+// =========================================================
+
+// POST /api/ai/generate-description: Generate an editable task description using AI
+app.post('/api/ai/generate-description', authMiddleware, async (req, res) => {
+    const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
+    if (!title) {
+        return res.status(400).json({ error: 'Task title is required' });
+    }
+
+    // Rate limiting: 1 AI request per task per minute
+    const rateLimitKey = `${req.user.id}:${title.toLowerCase()}`;
+    const lastRequestAt = aiRequestTimes.get(rateLimitKey);
+    if (lastRequestAt && Date.now() - lastRequestAt < AI_RATE_LIMIT_MS) {
+        return res.status(429).json({
+            error: 'Please wait one minute before generating another description for this task.'
+        });
+    }
+    aiRequestTimes.set(rateLimitKey, Date.now());
+
+    const apiKey = process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.trim() : '';
+    if (!apiKey || apiKey === 'your_openai_api_key_here') {
+        return res.status(200).json({
+            description: 'AI suggestions are unavailable. Please add a description manually.',
+            fallback: true
+        });
+    }
+
+    try {
+        const client = new OpenAI({ apiKey });
+        const completion = await client.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are a helpful assistant for a task management app. Generate a single concise, practical task description in 1-2 sentences without greetings or meta-commentary.'
+                },
+                {
+                    role: 'user',
+                    content: `Write a concise, practical task description for: ${title}`
+                }
+            ],
+            max_tokens: 80
+        });
+
+        const description = completion.choices[0]?.message?.content?.trim();
+        if (!description) {
+            throw new Error('AI provider returned an empty description');
+        }
+
+        return res.status(200).json({
+            description,
+            fallback: false
+        });
+    } catch (err) {
+        console.error('AI description generation failed:', err.message);
+        return res.status(200).json({
+            description: 'AI suggestions are temporarily unavailable. Please write a description manually.',
+            fallback: true
+        });
+    }
+});
+
+// =========================================================
+// 12. Unknown Routes & Global Error Handler
 // =========================================================
 
 // Unknown routes
